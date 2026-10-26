@@ -1,9 +1,88 @@
 import math
 import random
 import sys
- 
+import threading
+import time
+
+try:
+    import serial
+    import serial.tools.list_ports
+    HAS_SERIAL = True
+except ImportError:
+    HAS_SERIAL = False
+
 import pygame
- 
+
+# ---------------------------------------------------------------- Bo dieu khien ESP32 qua Serial (USB)
+class ESP32Controller:
+    def __init__(self, baud=115200):
+        self.baud = baud
+        self.dx = 0
+        self.dy = 0
+        self.bomb_pressed = False
+        self.connected = False
+        self.current_port = None
+        self.running = True
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def _find_port(self):
+        if not HAS_SERIAL:
+            return None
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        if "COM3" in ports:
+            return "COM3"
+        return ports[0] if ports else None
+
+    def _worker(self):
+        buffer = ""
+        while self.running:
+            if not self.connected:
+                p = self._find_port()
+                if p:
+                    try:
+                        ser = serial.Serial(p, self.baud, timeout=0.05)
+                        self.current_port = p
+                        self.connected = True
+                        buffer = ""
+                        print(f"[ESP32] Da ket noi tay cam tai {p}!")
+                        while self.running and self.connected:
+                            waiting = ser.in_waiting
+                            if waiting > 0:
+                                chunk = ser.read(waiting).decode('utf-8', errors='ignore')
+                                buffer += chunk
+                                if '\n' in buffer:
+                                    lines = buffer.split('\n')
+                                    buffer = lines[-1]
+                                    for line in reversed(lines[:-1]):
+                                        parts = line.strip().split(',')
+                                        if len(parts) >= 3:
+                                            try:
+                                                self.dx = int(parts[0])
+                                                self.dy = int(parts[1])
+                                                self.bomb_pressed = (int(parts[2]) == 1)
+                                                break
+                                            except ValueError:
+                                                pass
+                            time.sleep(0.005)
+                    except Exception:
+                        self.connected = False
+                        self.current_port = None
+                        buffer = ""
+                        time.sleep(1.0)
+                else:
+                    time.sleep(1.0)
+            time.sleep(0.01)
+
+    def get_dir(self):
+        if self.dx != 0:
+            return (self.dx, 0)
+        if self.dy != 0:
+            return (0, self.dy)
+        return (0, 0)
+
+esp32_ctrl = ESP32Controller()
+
 pygame.init()
  
 # ---------------------------------------------------------------- Cau hinh
@@ -131,6 +210,10 @@ class Player:
         cur = set()
         for name, dv in (("left", (-1, 0)), ("right", (1, 0)), ("up", (0, -1)), ("down", (0, 1))):
             if any(k[key] for key in self.keys[name]):
+                cur.add(dv)
+        if self.idx == 0 and esp32_ctrl and esp32_ctrl.connected:
+            dv = esp32_ctrl.get_dir()
+            if dv != (0, 0):
                 cur.add(dv)
         self.stack = [d for d in self.stack if d in cur]
         for d in cur:
@@ -813,10 +896,18 @@ class Game:
         )
         for i, (ln, col) in enumerate(lines):
             draw_text(screen, ln, font_small, W // 2, 450 + i * 30, col, outline=1)
+        # Trang thai tay cam ESP32
+        if esp32_ctrl and esp32_ctrl.connected:
+            draw_text(screen, f"Tay cam ESP32 ({esp32_ctrl.current_port}): DA KET NOI", font_tiny,
+                      W // 2, 542, (120, 255, 150), outline=1)
+        else:
+            draw_text(screen, "Tay cam ESP32: Chua ket noi (cam cap USB)", font_tiny,
+                      W // 2, 542, (170, 170, 190), outline=1)
+
         draw_text(screen, "F = bom no xa hon     B = them bom     S = chay nhanh", font_tiny,
-                  W // 2, 560, (190, 190, 215), outline=1)
+                  W // 2, 570, (190, 190, 215), outline=1)
         if (self.tick // 30) % 2 == 0:
-            draw_text(screen, "Len / Xuong de chon, ENTER de bat dau", font_small, W // 2, 610, (120, 255, 150))
+            draw_text(screen, "Len / Xuong de chon, ENTER / NUT BAM de bat dau", font_small, W // 2, 615, (120, 255, 150))
  
     # ------------------------------------------------------- su kien
     def handle_key(self, key):
@@ -859,6 +950,8 @@ class Game:
  
 def main():
     game = Game()
+    last_bomb = False
+    menu_timer = 0
     while True:
         clock.tick(FPS)
         for e in pygame.event.get():
@@ -867,6 +960,35 @@ def main():
                 sys.exit()
             if e.type == pygame.KEYDOWN:
                 game.handle_key(e.key)
+
+        # Xu ly tin hieu tu tay cam ESP32
+        if esp32_ctrl and esp32_ctrl.connected:
+            # 1. Nut bam dat bom / chon menu
+            cur_bomb = esp32_ctrl.bomb_pressed
+            if cur_bomb and not last_bomb:
+                if game.state == "play":
+                    game.handle_key(pygame.K_h)
+                elif game.state == "title":
+                    game.handle_key(pygame.K_RETURN)
+                elif game.state in ("gameover", "matchover"):
+                    game.handle_key(pygame.K_RETURN)
+                elif game.state == "paused":
+                    game.handle_key(pygame.K_p)
+            last_bomb = cur_bomb
+
+            # 2. Dieu huong Menu bang Joystick
+            if game.state == "title":
+                if esp32_ctrl.dy < 0 and menu_timer <= 0:
+                    game.handle_key(pygame.K_w)
+                    menu_timer = 15
+                elif esp32_ctrl.dy > 0 and menu_timer <= 0:
+                    game.handle_key(pygame.K_s)
+                    menu_timer = 15
+                elif esp32_ctrl.dy == 0:
+                    menu_timer = 0
+                else:
+                    menu_timer -= 1
+
         game.update()
         game.draw()
  
