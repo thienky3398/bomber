@@ -26,52 +26,80 @@ class ESP32Controller:
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
-    def _find_port(self):
-        if not HAS_SERIAL:
-            return None
-        ports = [p.device for p in serial.tools.list_ports.comports()]
-        if "COM3" in ports:
-            return "COM3"
-        return ports[0] if ports else None
-
     def _worker(self):
-        buffer = ""
         while self.running:
             if not self.connected:
-                p = self._find_port()
-                if p:
-                    try:
-                        ser = serial.Serial(p, self.baud, timeout=0.05)
-                        self.current_port = p
-                        self.connected = True
-                        buffer = ""
-                        print(f"[ESP32] Da ket noi tay cam tai {p}!")
-                        while self.running and self.connected:
-                            waiting = ser.in_waiting
-                            if waiting > 0:
-                                chunk = ser.read(waiting).decode('utf-8', errors='ignore')
-                                buffer += chunk
-                                if '\n' in buffer:
-                                    lines = buffer.split('\n')
-                                    buffer = lines[-1]
-                                    for line in reversed(lines[:-1]):
-                                        parts = line.strip().split(',')
-                                        if len(parts) >= 3:
-                                            try:
-                                                self.dx = int(parts[0])
-                                                self.dy = int(parts[1])
-                                                self.bomb_pressed = (int(parts[2]) == 1)
-                                                break
-                                            except ValueError:
-                                                pass
-                            time.sleep(0.005)
-                    except Exception:
-                        self.connected = False
-                        self.current_port = None
-                        buffer = ""
-                        time.sleep(1.0)
-                else:
+                if not HAS_SERIAL:
                     time.sleep(1.0)
+                    continue
+
+                ports = serial.tools.list_ports.comports()
+                candidates = []
+                for p in ports:
+                    desc = (p.description or "").lower()
+                    hwid = (p.hwid or "").lower()
+                    dev = p.device
+                    if dev.upper() == "COM1" and len(ports) > 1:
+                        candidates.append((dev, 0))
+                        continue
+                    score = 1
+                    if any(k in desc or k in hwid for k in ("ch340", "cp210", "usb", "uart", "silicon")):
+                        score = 2
+                    candidates.append((dev, score))
+                candidates.sort(key=lambda x: x[1], reverse=True)
+
+                for dev, _ in candidates:
+                    try:
+                        ser = serial.Serial(dev, self.baud, timeout=0.05)
+                        t0 = time.time()
+                        buf = ""
+                        valid = False
+                        while time.time() - t0 < 0.4:
+                            if ser.in_waiting > 0:
+                                buf += ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                                for line in buf.split('\n'):
+                                    pts = line.strip().split(',')
+                                    if len(pts) >= 3 and pts[0] in ('-1', '0', '1') and pts[1] in ('-1', '0', '1'):
+                                        valid = True
+                                        break
+                            if valid:
+                                break
+                            time.sleep(0.04)
+
+                        if valid:
+                            self.current_port = dev
+                            self.connected = True
+                            print(f"[ESP32] Tu dong nhan dien tay cam tai {dev}!")
+                            buffer = ""
+                            while self.running and self.connected:
+                                waiting = ser.in_waiting
+                                if waiting > 0:
+                                    chunk = ser.read(waiting).decode('utf-8', errors='ignore')
+                                    buffer += chunk
+                                    if '\n' in buffer:
+                                        lines = buffer.split('\n')
+                                        buffer = lines[-1]
+                                        for line in reversed(lines[:-1]):
+                                            parts = line.strip().split(',')
+                                            if len(parts) >= 3:
+                                                try:
+                                                    self.dx = int(parts[0])
+                                                    self.dy = int(parts[1])
+                                                    self.bomb_pressed = (int(parts[2]) == 1)
+                                                    break
+                                                except ValueError:
+                                                    pass
+                                time.sleep(0.005)
+                            try:
+                                ser.close()
+                            except Exception:
+                                pass
+                            break
+                        else:
+                            ser.close()
+                    except Exception:
+                        pass
+                time.sleep(1.0)
             time.sleep(0.01)
 
     def get_dir(self):
@@ -897,12 +925,15 @@ class Game:
         for i, (ln, col) in enumerate(lines):
             draw_text(screen, ln, font_small, W // 2, 450 + i * 30, col, outline=1)
         # Trang thai tay cam ESP32
-        if esp32_ctrl and esp32_ctrl.connected:
+        if not HAS_SERIAL:
+            draw_text(screen, "LOI: May chua cai thu vien! Mo CMD go: pip install pyserial", font_tiny,
+                      W // 2, 542, (255, 110, 110), outline=1)
+        elif esp32_ctrl and esp32_ctrl.connected:
             draw_text(screen, f"Tay cam ESP32 ({esp32_ctrl.current_port}): DA KET NOI", font_tiny,
                       W // 2, 542, (120, 255, 150), outline=1)
         else:
-            draw_text(screen, "Tay cam ESP32: Chua ket noi (cam cap USB)", font_tiny,
-                      W // 2, 542, (170, 170, 190), outline=1)
+            draw_text(screen, "Tay cam ESP32: Dang tim kiem cong COM... (kiem tra cap/driver)", font_tiny,
+                      W // 2, 542, (240, 200, 100), outline=1)
 
         draw_text(screen, "F = bom no xa hon     B = them bom     S = chay nhanh", font_tiny,
                   W // 2, 570, (190, 190, 215), outline=1)
